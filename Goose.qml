@@ -7,12 +7,7 @@ import qs.Utils
 PanelWindow {
   id: root
   color: "transparent"
-  anchors {
-    left: true
-    right: true
-    bottom: true
-    top: true
-}
+  anchors { left: true; right: true; bottom: true; top: true }
   mask: Region {}
   WlrLayershell.exclusionMode: ExclusionMode.Ignore
   WlrLayershell.layer: WlrLayer.Overlay
@@ -20,12 +15,58 @@ PanelWindow {
 
   /* ------------------- Parameters ------------------- */
   // use point so we keep fractional position
-  property var positionF: Qt.point(width * 0.5, height * 0.75)
-  //  0°=right, 90°=down
+  property var  positionF: Qt.point(width * 0.5, height * 0.75)
+  // 0°=right, 90°=down
   property real angleDeg: 40
   property real neckLerp: 0.0
 
-  /* ------------------- Derived vectors  ------------------- */
+  // Speeds/accel
+  property real directionDeg: 90
+  property var  velocity: Qt.point(0, 0)
+  property var  targetPos: Qt.point(width * 0.25, height * 0.75)
+  property real currentSpeed: 80         // Walk = 80, Run = 200, Charge = 400
+  property real currentAccel: 1300       // Normal = 1300, Charge = 2300
+  property real stepTime: 0.2            // 0.2 (walk/run), 0.1 (charge)
+
+  // Wander task (very light port)
+  property real _wanderStart: 0
+  property real _wanderDuration: 6
+  property real _pauseStart: -1
+  property real _pauseDuration: 0
+
+  // Timing
+  property real _lastTsMs: Date.now()
+
+  // Feet animation state
+  readonly property real wantStepAtDistance: 5          
+  readonly property real feetDistanceApart: 6           
+  readonly property real stepOvershootPx: 0.4 * 5       
+  property var   lFootPos: leftFootHome
+  property var   rFootPos: rightFootHome
+  property real  lFootMoveStart: -1
+  property real  rFootMoveStart: -1
+  property var   lFootMoveOrigin: leftFootHome
+  property var   rFootMoveOrigin: rightFootHome
+  property var   lFootMoveDir: Qt.point(0, 0)
+  property var   rFootMoveDir: Qt.point(0, 0)
+
+  property real  liftHeight: 1
+  property real  lFootLift: 0
+  property real  rFootLift: 0
+
+  // Helpers (tiny vector ops)
+  function v(x, y){ return Qt.point(x, y) }
+  function add(a,b){ return v(a.x+b.x, a.y+b.y) }
+  function sub(a,b){ return v(a.x-b.x, a.y-b.y) }
+  function mul(a,k){ return v(a.x*k, a.y*k) }
+  function mag(v){ return Math.hypot(v.x, v.y) }
+  function norm(vp){ let m=mag(vp); return m>1e-6 ? v(vp.x/m, vp.y/m) : v(0,0) }
+  function lerp(a,b,t){ return a+(b-a)*t }
+  function clamp(x,a,b){ return Math.max(a, Math.min(b,x)) }
+  function angleToVec(deg){ let r=deg*Math.PI/180; return v(Math.cos(r), Math.sin(r)) }
+  function vecToAngle(v){ return Math.atan2(v.y, v.x)*180/Math.PI }
+  function cubicInOut(t){ return (t<0.5) ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2 }
+
   readonly property real _rad: angleDeg * Math.PI / 180
   readonly property real _fx:  Math.cos(_rad)
   readonly property real _fy:  Math.sin(_rad)
@@ -45,9 +86,10 @@ PanelWindow {
   /* ------------------- Feet (float centers) ------------------- */
   property real footRadius: 4
   readonly property var leftFootHome:  Qt.point(_ix, _iy)
-  readonly property var rightFootHome: Qt.point(_ix + _lx * 6, _iy + _ly * 6)
-  readonly property var lFootPos: leftFootHome
-  readonly property var rFootPos: rightFootHome
+  readonly property var rightFootHome: Qt.point(
+    _ix + _lx * feetDistanceApart,
+    _iy + _ly * feetDistanceApart
+  )
 
   /* ------------------- Rig ------------------- */
   readonly property var underbodyCenter: Qt.point(_ix + _ux * 9,  _iy + _uy * 9)
@@ -73,27 +115,165 @@ PanelWindow {
     head1End.y + _fy * 5
   )
   readonly property var beakTip: Qt.point(
-    head2End.x + _fx * 3,
-    head2End.y + _fy * 3
+    head2End.x + _fx * 5,
+    head2End.y + _fy * 5
   )
 
   /* ------------------- Eyes ------------------- */
   readonly property real _bx: 1.3
   readonly property real _by: 0.4
-  readonly property real _slx: _lx * _bx    // lateral scaled component-wise
+  readonly property real _slx: _lx * _bx
   readonly property real _sly: _ly * _by
-
-  // FLOAT anchor: neckHeadPoint + up*3 + forward*5
   readonly property real _eyeBaseX: neckHeadPoint.x + _ux * 3 + _fx * 5
   readonly property real _eyeBaseY: neckHeadPoint.y + _uy * 3 + _fy * 5
-
   readonly property real eyeOffset: 5
   readonly property real eyeRadius: 2
-
-  readonly property real leftEyeX:  _eyeBaseX - _slx * eyeOffset   // minus scaled lateral
+  readonly property real leftEyeX:  _eyeBaseX - _slx * eyeOffset
   readonly property real leftEyeY:  _eyeBaseY - _sly * eyeOffset
-  readonly property real rightEyeX: _eyeBaseX + _slx * eyeOffset   // plus  scaled lateral
+  readonly property real rightEyeX: _eyeBaseX + _slx * eyeOffset
   readonly property real rightEyeY: _eyeBaseY + _sly * eyeOffset
+
+  function setSpeed(tier) {
+    // "Walk", "Run", "Charge"
+    if (tier === "Walk")  { currentSpeed = 80;  currentAccel = 1300; stepTime = 0.2 }
+    if (tier === "Run")   { currentSpeed = 200; currentAccel = 1300; stepTime = 0.2 }
+    if (tier === "Charge"){ currentSpeed = 400; currentAccel = 2300; stepTime = 0.1 }
+  }
+
+  function startWander() {
+    setSpeed("Walk")
+    _wanderStart = nowSec()
+
+    _wanderDuration = randRange(4, 9)
+    _pauseStart = -1
+    _pauseDuration = 0
+
+    // initial wander target
+    retargetWithinSeconds(randRange(1, 6))
+  }
+
+  function nowSec(){ return Date.now()/1000 }
+  function randRange(a,b){ return a + Math.random()*(b-a) }
+
+  function retargetWithinSeconds(maxWalkTime) {
+    let rnd = v(Math.random()*width, Math.random()*height)
+    let toRnd = sub(rnd, positionF)
+    let dist = mag(toRnd)
+    let maxDist = currentSpeed * maxWalkTime
+    if (dist > maxDist) rnd = add(positionF, mul(norm(toRnd), maxDist))
+    targetPos = rnd
+  }
+
+  function runWander() {
+    // End wander and restart periodically
+    if (nowSec() - _wanderStart > _wanderDuration) {
+      startWander()
+      return
+    }
+    // execute pause
+    if (_pauseStart > 0) {
+      if (nowSec() - _pauseStart > _pauseDuration) {
+        _pauseStart = -1
+        retargetWithinSeconds(randRange(1,6))
+      } else {
+        velocity = v(0,0)
+      }
+      return
+    }
+    // pause a bit when close to target
+    if (mag(sub(positionF, targetPos)) < 20) {
+      _pauseStart = nowSec()
+      _pauseDuration = randRange(1, 2) // 1..2s
+    }
+  }
+
+    function solveFeet() {
+      const lfHome = leftFootHome
+      const rfHome = rightFootHome
+
+      if (lFootMoveStart < 0 && rFootMoveStart < 0) {
+        // choose which foot to move (only when both are planted)
+        if (mag(sub(lFootPos, lfHome)) > wantStepAtDistance) {
+          lFootMoveOrigin = lFootPos
+          lFootMoveDir    = norm(sub(lfHome, lFootPos))
+          lFootMoveStart  = nowSec()
+          return
+        }
+        if (mag(sub(rFootPos, rfHome)) > wantStepAtDistance) {
+          rFootMoveOrigin = rFootPos
+          rFootMoveDir    = norm(sub(rfHome, rFootPos))
+          rFootMoveStart  = nowSec()
+          return
+        }
+        return
+      }
+
+      if (lFootMoveStart > 0) {
+        const b = add(lfHome, mul(lFootMoveDir, stepOvershootPx)) 
+        const t = clamp((nowSec() - lFootMoveStart) / stepTime, 0, 1)
+        const p = cubicInOut(t)
+        lFootPos = v( lerp(lFootMoveOrigin.x, b.x, p), lerp(lFootMoveOrigin.y, b.y, p) )
+        if (t >= 1) {
+          lFootPos = b
+          lFootMoveStart = -1
+        }
+        return
+      }
+
+      if (rFootMoveStart > 0) {
+        const b2 = add(rfHome, mul(rFootMoveDir, stepOvershootPx))
+        const t2 = clamp((nowSec() - rFootMoveStart) / stepTime, 0, 1)
+        const p2 = cubicInOut(t2)
+        rFootPos = v( lerp(rFootMoveOrigin.x, b2.x, p2), lerp(rFootMoveOrigin.y, b2.y, p2) )
+        if (t2 >= 1) {
+          rFootPos = b2
+          rFootMoveStart = -1
+        }
+      }
+    }
+
+  function tickOnce() {
+    // dt
+    const nowMs = Date.now()
+    const dt = Math.max(0.001, (nowMs - _lastTsMs) / 1000.0)   // seconds
+    _lastTsMs = nowMs
+
+    runWander()
+
+    // steer
+    const targetDir = norm(sub(targetPos, positionF))
+    const blended = norm(add(mul(angleToVec(directionDeg), 1-0.25), mul(targetDir, 0.25)))
+    directionDeg = vecToAngle(blended)
+    
+    // accelarate torwards targed
+    if (mag(velocity) > currentSpeed) velocity = mul(norm(velocity), currentSpeed)
+    velocity = add(velocity, mul(targetDir, currentAccel * dt))
+
+    positionF = add(positionF, mul(velocity, dt))
+    angleDeg = directionDeg
+
+    solveFeet()
+
+    // Neck extension when moving fast
+    const extend = (currentSpeed >= 200) ? 1 : 0
+    neckLerp = lerp(neckLerp, extend, 0.075)
+  }
+
+  Timer {
+    id: ticker
+    interval: 16
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: tickOnce()
+  }
+
+  Component.onCompleted: {
+    lFootPos = leftFootHome
+    rFootPos = rightFootHome
+    // Spawn with a wander task
+    startWander()
+  }
 
   /* =================== DRAWING =================== */
 
