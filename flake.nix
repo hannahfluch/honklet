@@ -46,7 +46,7 @@
             meta = {
               description = "HONK";
               homepage = "https://github.com/hannahfluch/honklet";
-              license = lib.licenses.mit;
+              license = lib.licenses.gpl3Only;
               mainProgram = "honklet";
             };
           };
