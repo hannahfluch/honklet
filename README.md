@@ -10,7 +10,6 @@ Add the input to your flake.nix:
 honklet = {
       url = "github:hannahfluch/honklet";
       inputs.nixpkgs.follows = "nixpkgs"; # optional
-      inputs.systems.follows = "systems"; # optional
 };
 ```
 
