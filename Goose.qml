@@ -237,6 +237,18 @@ PanelWindow {
     const nowMs = Date.now()
     const dt = Math.max(0.001, (nowMs - _lastTsMs) / 1000.0)   // seconds
     _lastTsMs = nowMs
+    if (dt > 0.25) {
+          dt = 0.016
+      }
+      if (!positionF || !velocity || !targetPos) {
+        positionF = Qt.point(width * 0.5, height * 0.75)
+        velocity = Qt.point(0, 0)
+        targetPos = Qt.point(width * 0.25, height * 0.75)
+        return
+      }
+
+
+
 
     runWander()
 
